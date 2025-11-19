@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: meesho-label-downloader
+    env: docker
+    plan: free
+    dockerContext: .
+    envVars:
+      - key: MEESHO_EMAIL
+        sync: false
+      - key: MEESHO_PASSWORD
+        sync: false
+      - key: LABEL_DOWNLOADED_FILTER
+        sync: false
+

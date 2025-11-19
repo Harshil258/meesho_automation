@@ -1,0 +1,403 @@
+require('dotenv').config();
+const puppeteer = require('puppeteer-extra');
+// const StealthPlugin = require('puppeteer-extra-plugin-stealth'); // Disabled due to stack overflow
+const fs = require('fs');
+const path = require('path');
+
+// puppeteer.use(StealthPlugin());
+
+// Create date-based download folder
+const now = new Date();
+const dateFolder = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+const DOWNLOAD_PATH = path.resolve(__dirname, 'downloads', dateFolder);
+const COOKIES_PATH = path.resolve(__dirname, 'cookies.json');
+
+// Ensure download directory exists and is empty of previous downloads
+if (!fs.existsSync(DOWNLOAD_PATH)) {
+    fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
+    console.log(`Created download folder: ${dateFolder}`);
+} else {
+    // Clean up existing files in today's folder to avoid false positives
+    const files = fs.readdirSync(DOWNLOAD_PATH);
+    for (const file of files) {
+        if (file.endsWith('.pdf')) {
+            fs.unlinkSync(path.join(DOWNLOAD_PATH, file));
+        }
+    }
+}
+
+const randomDelay = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+async function saveCookies(page) {
+    const cookies = await page.cookies();
+    fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
+    console.log('Cookies saved.');
+}
+
+async function loadCookies(page) {
+    if (fs.existsSync(COOKIES_PATH)) {
+        const cookiesString = fs.readFileSync(COOKIES_PATH);
+        const cookies = JSON.parse(cookiesString);
+        await page.setCookie(...cookies);
+        console.log('Cookies loaded.');
+        return true;
+    }
+    return false;
+}
+
+(async () => {
+    console.log('Starting Meesho Label Downloader...');
+
+    const browser = await puppeteer.launch({
+        headless: "new", // Production: headless mode for servers
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--window-size=1280,800'
+        ],
+        defaultViewport: null
+    });
+
+    const page = await browser.newPage();
+
+    // Set User Agent to avoid bot detection (and fix loading issues)
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+    // Set download behavior - store client for reuse
+    let client = await page.target().createCDPSession();
+    await client.send('Page.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: DOWNLOAD_PATH,
+    });
+
+    try {
+        // Load cookies if available
+        const cookiesLoaded = await loadCookies(page);
+
+        // Navigate to Home first to check login status
+        console.log('Navigating to Home to check session...');
+        await page.goto('https://supplier.meesho.com/panel/v3/new/root/home', { waitUntil: 'networkidle2', timeout: 60000 });
+        await new Promise(r => setTimeout(r, randomDelay(2000, 4000)));
+
+        // Check if session is valid
+        let isSessionValid = false;
+        if (cookiesLoaded) {
+            console.log('Checking session validity...');
+            try {
+                // Check for "Orders" or "Home" text or specific dashboard element
+                await page.waitForFunction(() => {
+                    const bodyText = document.body.innerText;
+                    return bodyText.includes('Orders') || bodyText.includes('Home') || bodyText.includes('Welcome');
+                }, { timeout: 10000 });
+
+                // Also check internal state if possible
+                const isAuthenticated = await page.evaluate(() => {
+                    return window.__SUPPLY_DATA__?.registrationStatus?.isAuthenticated !== false;
+                });
+
+                if (isAuthenticated) {
+                    console.log('Session is valid.');
+                    isSessionValid = true;
+                } else {
+                    console.warn('Session invalid (isAuthenticated: false).');
+                }
+            } catch (e) {
+                console.warn('Session check failed (timeout or error).');
+            }
+        }
+
+        if (!isSessionValid) {
+            console.log('Session expired, invalid, or not found. Clearing cookies and logging in...');
+
+            // Clear cookies - reuse existing client
+            await client.send('Network.clearBrowserCookies');
+            if (fs.existsSync(COOKIES_PATH)) {
+                fs.unlinkSync(COOKIES_PATH);
+            }
+
+            // Navigate to Login
+            await page.goto('https://supplier.meesho.com/panel/v3/new/root/login', { waitUntil: 'networkidle2', timeout: 60000 });
+
+            // Login Flow
+            const emailSelector = 'input[name="emailOrPhone"]'; // Corrected selector
+            const passwordSelector = 'input[type="password"], input[name="password"]';
+
+            await page.waitForSelector(emailSelector, { visible: true, timeout: 30000 });
+            await page.type(emailSelector, process.env.MEESHO_EMAIL, { delay: randomDelay(50, 150) });
+            await new Promise(r => setTimeout(r, randomDelay(500, 1000)));
+
+            await page.type(passwordSelector, process.env.MEESHO_PASSWORD, { delay: randomDelay(50, 150) });
+            await new Promise(r => setTimeout(r, randomDelay(500, 1000)));
+
+            console.log(`Password length: ${process.env.MEESHO_PASSWORD ? process.env.MEESHO_PASSWORD.length : 0}`);
+
+            // Click Login Button
+            const loginButton = await page.evaluateHandle(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                return buttons.find(b => b.innerText.includes('Log in') || b.innerText.includes('Login'));
+            });
+
+            if (loginButton.asElement()) {
+                console.log('Found login button, clicking...');
+                await loginButton.click();
+            } else {
+                console.log('Login button not found, trying Enter key...');
+                await page.keyboard.press('Enter');
+            }
+
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
+            console.log('Login submitted.');
+
+            // Verify Login
+            await new Promise(r => setTimeout(r, 5000));
+            if (page.url().includes('login')) {
+                console.error('Still on login page. Login failed.');
+                await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'login_failed.png') });
+                throw new Error('Login failed - stayed on login page');
+            }
+
+            // Save cookies after successful login
+            await saveCookies(page);
+        } else {
+            console.log('Already logged in and session is valid!');
+        }
+
+        // Wait for loading spinner to disappear
+        try {
+            await page.waitForSelector('.loading-container-wrapper', { hidden: true, timeout: 30000 });
+            console.log('Loading spinner disappeared.');
+        } catch (e) {
+            console.log('Loading spinner did not disappear or was not found (page might be loaded).');
+        }
+
+        // Wait for sidebar or dashboard content
+        console.log('Waiting for dashboard content...');
+        try {
+            await page.waitForFunction(() => {
+                const bodyText = document.body.innerText;
+                return bodyText.includes('Orders') || bodyText.includes('Home');
+            }, { timeout: 30000 });
+            console.log('Dashboard content detected.');
+        } catch (e) {
+            console.warn('Timeout waiting for "Orders" or "Home" text.');
+        }
+
+        console.log('Current URL:', page.url());
+
+        // Debug: Save Home Page HTML
+        await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'home_page_debug.png') });
+        const homeHtml = await page.content();
+        fs.writeFileSync(path.join(DOWNLOAD_PATH, 'home_page_debug.html'), homeHtml);
+        console.log('Saved home page debug info.');
+
+        // Navigate to Orders via Sidebar
+        console.log('Navigating to Orders via Sidebar...');
+
+        // Try to find "Orders" in sidebar
+        const ordersMenuItem = await page.evaluateHandle(() => {
+            const elements = Array.from(document.querySelectorAll('p, span, div, a'));
+            // Look for "Orders" text specifically
+            return elements.find(el => el.innerText.trim() === 'Orders');
+        });
+
+        if (ordersMenuItem.asElement()) {
+            await ordersMenuItem.click();
+            console.log('Clicked "Orders" in sidebar.');
+            // Wait for navigation or content change
+            await new Promise(r => setTimeout(r, randomDelay(3000, 5000)));
+        } else {
+            console.warn('Could not find "Orders" menu item. Attempting direct navigation fallback...');
+            // Fallback: construct URL dynamically if possible, or use the one we know works for this user
+            // The previous URL was .../orders/pending. Let's try to go there directly if sidebar fails.
+            // But we need the supplier ID. It's in the current URL.
+            const currentUrl = page.url();
+            const supplierIdMatch = currentUrl.match(/\/fulfillment\/([^\/]+)\//) || currentUrl.match(/\/growth\/([^\/]+)\//);
+            if (supplierIdMatch && supplierIdMatch[1]) {
+                const supplierId = supplierIdMatch[1];
+                const ordersUrl = `https://supplier.meesho.com/panel/v3/new/fulfillment/${supplierId}/orders/ready-to-ship`;
+                console.log(`Navigating directly to: ${ordersUrl}`);
+                await page.goto(ordersUrl, { waitUntil: 'domcontentloaded' });
+            } else {
+                throw new Error('Could not determine Supplier ID for direct navigation.');
+            }
+        }
+
+        // Handle "Ready to Ship" tab
+        console.log('Looking for "Ready to Ship" tab...');
+        // Navigate to Ready to Ship
+        console.log('Looking for "Ready to Ship" tab...');
+        await new Promise(r => setTimeout(r, randomDelay(2000, 3000)));
+
+        // Wait for tabs to be present
+        try {
+            await page.waitForSelector('button[role="tab"]', { timeout: 10000 });
+            console.log('Tabs loaded.');
+        } catch (e) {
+            console.warn('Tabs not found.');
+        }
+
+        // Find and click "Ready to Ship" tab
+        const readyToShipTab = await page.evaluateHandle(() => {
+            const buttons = Array.from(document.querySelectorAll('button[role="tab"]'));
+            return buttons.find(btn => btn.innerText.includes('Ready to Ship'));
+        });
+
+        if (readyToShipTab.asElement()) {
+            console.log('Found "Ready to Ship" tab, clicking...');
+            await readyToShipTab.click();
+            await new Promise(r => setTimeout(r, randomDelay(2000, 4000)));
+            console.log('Navigated to Ready to Ship.');
+        } else {
+            console.log('"Ready to Ship" tab not found. Checking if we are already there...');
+            if (!page.url().includes('ready-to-ship')) {
+                console.warn('Might not be on Ready to Ship page. Current URL: ' + page.url());
+                await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'nav_error.png') });
+                const html = await page.content();
+                fs.writeFileSync(path.join(DOWNLOAD_PATH, 'nav_error.html'), html);
+            }
+        }
+
+        // Filter Logic
+        console.log('Applying filters...');
+        await new Promise(r => setTimeout(r, randomDelay(1000, 2000)));
+
+        // Find "Label downloaded" dropdown
+        const dropdown = await page.evaluateHandle(() => {
+            const elements = Array.from(document.querySelectorAll('div, span, p'));
+            return elements.find(el => el.innerText.trim() === 'Label downloaded');
+        });
+
+        if (dropdown.asElement()) {
+            await dropdown.click();
+            console.log('Clicked "Label downloaded" dropdown.');
+            await new Promise(r => setTimeout(r, randomDelay(1000, 2000)));
+
+            const filterOptionText = process.env.LABEL_DOWNLOADED_FILTER || 'No';
+            const filterOption = await page.evaluateHandle((text) => {
+                const elements = Array.from(document.querySelectorAll('li, div, span')); // Dropdown items are often li or div
+                return elements.find(el => el.innerText.trim() === text);
+            }, filterOptionText);
+
+            if (filterOption.asElement()) {
+                await filterOption.click();
+                console.log(`Filter "Label downloaded: ${filterOptionText}" applied.`);
+                await new Promise(r => setTimeout(r, randomDelay(3000, 5000)));
+            } else {
+                console.warn(`Option "${filterOptionText}" not found.`);
+            }
+        } else {
+            console.warn('"Label downloaded" dropdown not found.');
+        }
+
+        // Select All
+        console.log('Selecting all orders...');
+        // Try multiple strategies for checkbox
+        const checkbox = await page.evaluateHandle(() => {
+            // Strategy 1: Header checkbox
+            const headerCheckbox = document.querySelector('thead input[type="checkbox"]');
+            if (headerCheckbox) return headerCheckbox;
+
+            // Strategy 2: First checkbox in main area (risky but fallback)
+            const firstCheckbox = document.querySelector('input[type="checkbox"]');
+            return firstCheckbox;
+        });
+
+        if (checkbox.asElement()) {
+            await checkbox.click();
+            console.log('Clicked Select All checkbox.');
+            await new Promise(r => setTimeout(r, randomDelay(1000, 2000)));
+        } else {
+            console.warn('Select All checkbox not found.');
+            await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'no_checkbox.png') });
+        }
+
+        // Download Button
+        console.log('Triggering download...');
+        const downloadBtn = await page.evaluateHandle(() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            // Look for button with "Label" text that is NOT the dropdown filter
+            return buttons.find(b => b.innerText.trim() === 'Label' && !b.disabled);
+        });
+
+        if (downloadBtn.asElement()) {
+            await downloadBtn.click();
+            console.log('Clicked main Label button.');
+
+            // Wait for modal response (success or temporary issue)
+            console.log('Waiting for modal response...');
+            let modalResult = null;
+            try {
+                modalResult = await page.waitForFunction(() => {
+                    const bodyText = document.body.innerText;
+                    if (bodyText.includes('Temporary issue with Label Generation')) {
+                        return 'temporary_issue';
+                    }
+                    if (bodyText.includes('Labels generated successfully') || bodyText.includes('Label generated successfully')) {
+                        return 'success';
+                    }
+                    return null;
+                }, { timeout: 60000 });
+
+                const result = await modalResult.jsonValue();
+
+                if (result === 'temporary_issue') {
+                    console.log('⚠️  Temporary issue with Label Generation detected.');
+                    console.log('Meesho will retry automatically. No labels available to download at this time.');
+                    await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'temporary_issue.png') });
+                    console.log('Browser closed.');
+                    await browser.close();
+                    return;
+                }
+
+                console.log('Labels generated successfully.');
+
+                // Click download in modal
+                const modalDownloadBtn = await page.evaluateHandle(() => {
+                    // Find button with "Label" text inside a modal/dialog
+                    const dialogs = document.querySelectorAll('div[role="dialog"]');
+                    const lastDialog = dialogs[dialogs.length - 1]; // Usually the top one
+                    if (!lastDialog) return null;
+
+                    const buttons = Array.from(lastDialog.querySelectorAll('button'));
+                    return buttons.find(b => b.innerText.trim() === 'Label' || b.innerText.trim() === 'Download');
+                });
+
+                if (modalDownloadBtn.asElement()) {
+                    await modalDownloadBtn.click();
+                    console.log('Clicked download button in modal.');
+
+                    // Wait for PDF
+                    console.log('Waiting for PDF file download...');
+                    for (let i = 0; i < 60; i++) {
+                        const files = fs.readdirSync(DOWNLOAD_PATH);
+                        const pdfFile = files.find(f => f.endsWith('.pdf'));
+                        if (pdfFile) {
+                            console.log(`Downloaded file: ${pdfFile}`);
+                            break;
+                        }
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                } else {
+                    console.error('Download button in modal not found.');
+                    await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'error_modal_btn.png') });
+                }
+
+            } catch (e) {
+                console.error('Timeout waiting for label generation:', e.message);
+                await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'error_generation_timeout.png') });
+            }
+
+        } else {
+            console.error('Main "Label" button not found.');
+            await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'error_no_label_btn.png') });
+        }
+
+    } catch (error) {
+        console.error('An error occurred:', error);
+        await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'fatal_error.png') });
+    } finally {
+        console.log('Browser closed.');
+        await browser.close();
+    }
+})();
