@@ -182,8 +182,7 @@ async function loadCookies(page) {
     console.log('Starting Meesho Label Downloader...');
 
     const browser = await puppeteer.launch({
-        headless: process.env.PUPPETEER_EXECUTABLE_PATH ? true : false, // Force headless in Docker
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, // Use Chrome from Docker if set
+        headless: true, // Always headless on server
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
