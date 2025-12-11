@@ -41,7 +41,12 @@ app.post('/trigger', async (req, res) => {
 
     // Run the automation script in background
     console.log('📥 Automation triggered via API');
-    exec('node index.js', { cwd: __dirname }, (error, stdout, stderr) => {
+
+    // Pass environment variables to the child process
+    exec('node index.js', {
+        cwd: __dirname,
+        env: process.env  // Inherit all environment variables
+    }, (error, stdout, stderr) => {
         if (error) {
             console.error(`❌ Automation error: ${error.message}`);
             return;
@@ -57,4 +62,5 @@ app.listen(PORT, () => {
     console.log(`🚀 API server running on port ${PORT}`);
     console.log(`📍 Trigger URL: http://localhost:${PORT}/trigger`);
     console.log(`🔑 Set API_KEY environment variable for authentication`);
+    console.log(`🌐 Chrome executable: ${process.env.PUPPETEER_EXECUTABLE_PATH || 'default'}`);
 });
