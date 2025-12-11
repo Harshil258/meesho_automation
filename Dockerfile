@@ -1,16 +1,24 @@
 FROM ghcr.io/puppeteer/puppeteer:latest
 
-USER root
+WORKDIR /home/pptruser/app
 
-WORKDIR /app
+# Copy package files
+COPY --chown=pptruser:pptruser package*.json ./
 
-COPY package*.json ./
-RUN npm ci
+# Install dependencies
+RUN npm ci --only=production
 
-COPY . .
+# Copy app files
+COPY --chown=pptruser:pptruser . .
 
-# Create a directory for downloads
-RUN mkdir -p /app/downloads
-RUN chmod 777 /app/downloads
+# Create downloads directory
+RUN mkdir -p /home/pptruser/app/downloads && \
+    chown -R pptruser:pptruser /home/pptruser/app/downloads
+
+# Set Puppeteer to use the installed Chrome
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+
+USER pptruser
 
 CMD ["node", "index.js"]
+
