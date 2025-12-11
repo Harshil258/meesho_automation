@@ -20,5 +20,4 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 USER pptruser
 
-CMD ["node", "index.js"]
-
+CMD ["node", "server.js"]

@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: meesho-label-downloader
     env: docker
     dockerfilePath: ./Dockerfile
@@ -11,3 +11,5 @@ services:
         sync: false
       - key: LABEL_DOWNLOADED_FILTER
         sync: false
+      - key: API_KEY
+        generateValue: true
