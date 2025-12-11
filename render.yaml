@@ -1,10 +1,8 @@
 services:
   - type: web
     name: meesho-label-downloader
-    env: node
+    env: docker
     plan: free
-    buildCommand: npm install && npx puppeteer browsers install chrome
-    startCommand: node server.js
     envVars:
       - key: MEESHO_EMAIL
         sync: false
@@ -14,5 +12,3 @@ services:
         sync: false
       - key: API_KEY
         generateValue: true
-      - key: PUPPETEER_CACHE_DIR
-        value: /opt/render/.cache/puppeteer
