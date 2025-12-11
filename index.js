@@ -28,6 +28,139 @@ if (!fs.existsSync(DOWNLOAD_PATH)) {
 
 const randomDelay = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
+/**
+ * Check for and download label from "Ready to Ship Labels" dialog
+ * Returns true if dialog was found and download initiated, false otherwise
+ * @param {Page} page - Puppeteer page object
+ * @param {Browser} browser - Puppeteer browser object (optional, for closing after download)
+ */
+async function checkAndDownloadLabelDialog(page, browser = null) {
+    try {
+        // Check if the dialog with "Ready to Ship Labels" or "Labels generated successfully" exists
+        // OR check if there's a bottom action bar with "Orders Selected"
+        const dialogExists = await page.evaluate(() => {
+            const bodyText = document.body.innerText;
+            return bodyText.includes('Ready to Ship Labels') ||
+                bodyText.includes('Labels generated successfully') ||
+                bodyText.includes('Orders Selected');
+        });
+
+        if (!dialogExists) {
+            return false;
+        }
+
+        console.log('✓ Detected label download prompt!');
+
+        // Save screenshot and HTML for debugging
+        const timestamp = Date.now();
+        await page.screenshot({ path: path.join(DOWNLOAD_PATH, `dialog_detected_${timestamp}.png`) });
+        const dialogHtml = await page.content();
+        fs.writeFileSync(path.join(DOWNLOAD_PATH, `dialog_detected_${timestamp}.html`), dialogHtml);
+        console.log('📸 Saved debug screenshot and HTML');
+
+        // Wait a bit for UI to fully render
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Try multiple strategies to find the download button
+        console.log('🔍 Searching for Label download button...');
+
+        // Strategy 1: Look for "Label" button in bottom action bar (most common)
+        let downloadBtn = await page.evaluateHandle(() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            // Find a button with "Label" text that is NOT disabled
+            // and is likely in the action bar (has MuiButton-contained class)
+            return buttons.find(b => {
+                const text = b.innerText.trim().toLowerCase();
+                const isLabelBtn = text === 'label';
+                const isContainedBtn = b.className.includes('MuiButton-contained');
+                return isLabelBtn && isContainedBtn && !b.disabled;
+            });
+        });
+
+        // Strategy 2: Look for button with "Label" text anywhere on page
+        if (!downloadBtn.asElement()) {
+            console.log('⚠️  Strategy 1 failed, trying generic label button search...');
+            downloadBtn = await page.evaluateHandle(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                return buttons.find(b => {
+                    const text = b.innerText.trim().toLowerCase();
+                    return text === 'label' && !b.disabled;
+                });
+            });
+        }
+
+        // Strategy 3: Look inside dialog for button
+        if (!downloadBtn.asElement()) {
+            console.log('⚠️  Strategy 2 failed, trying dialog-based detection...');
+            downloadBtn = await page.evaluateHandle(() => {
+                const dialogs = document.querySelectorAll('div[role="dialog"]');
+                for (const dialog of dialogs) {
+                    const buttons = Array.from(dialog.querySelectorAll('button'));
+                    const labelBtn = buttons.find(b => {
+                        const text = b.innerText.trim().toLowerCase();
+                        return text === 'label' || text === 'download';
+                    });
+                    if (labelBtn) return labelBtn;
+                }
+                return null;
+            });
+        }
+
+        // Strategy 4: Look for button with download icon
+        if (!downloadBtn.asElement()) {
+            console.log('⚠️  Strategy 3 failed, trying icon-based detection...');
+            downloadBtn = await page.evaluateHandle(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                return buttons.find(b => {
+                    const hasDownloadIcon = b.querySelector('svg path[d*="M9.25 3"]'); // Download icon path
+                    const text = b.innerText.trim().toLowerCase();
+                    return hasDownloadIcon && (text === 'label' || text === 'download');
+                });
+            });
+        }
+
+        if (downloadBtn.asElement()) {
+            console.log('✓ Found Label download button, clicking...');
+            await downloadBtn.click();
+            console.log('✓ Clicked Label download button.');
+
+            // Wait for PDF download
+            console.log('Waiting for PDF file download...');
+            let downloadSuccess = false;
+            for (let i = 0; i < 30; i++) {
+                const files = fs.readdirSync(DOWNLOAD_PATH);
+                const pdfFile = files.find(f => f.endsWith('.pdf'));
+                if (pdfFile) {
+                    console.log(`✅ SUCCESS! Downloaded label file: ${pdfFile}`);
+                    console.log(`📁 Saved to: ${DOWNLOAD_PATH}`);
+                    downloadSuccess = true;
+
+                    // Close browser and exit after successful download
+                    if (browser) {
+                        console.log('🎉 Download complete! Closing browser and exiting...');
+                        await browser.close();
+                        process.exit(0);
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 1000));
+            }
+
+            if (!downloadSuccess) {
+                console.warn('⚠️  Download button clicked but PDF file not detected within 30 seconds.');
+            }
+            return downloadSuccess;
+        } else {
+            console.error('❌ All button detection strategies failed!');
+            console.log('💡 Check the debug screenshot and HTML files for troubleshooting');
+            return false;
+        }
+    } catch (error) {
+        console.error('Error in checkAndDownloadLabelDialog:', error.message);
+        return false;
+    }
+}
+
 async function saveCookies(page) {
     const cookies = await page.cookies();
     fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
@@ -49,7 +182,7 @@ async function loadCookies(page) {
     console.log('Starting Meesho Label Downloader...');
 
     const browser = await puppeteer.launch({
-        headless: "new", // Production: headless mode for servers
+        headless: false, // Set to false to see the browser in action
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -206,6 +339,9 @@ async function loadCookies(page) {
             console.log('Clicked "Orders" in sidebar.');
             // Wait for navigation or content change
             await new Promise(r => setTimeout(r, randomDelay(3000, 5000)));
+
+            // Check for label dialog after navigation
+            await checkAndDownloadLabelDialog(page, browser);
         } else {
             console.warn('Could not find "Orders" menu item. Attempting direct navigation fallback...');
             // Fallback: construct URL dynamically if possible, or use the one we know works for this user
@@ -248,6 +384,9 @@ async function loadCookies(page) {
             await readyToShipTab.click();
             await new Promise(r => setTimeout(r, randomDelay(2000, 4000)));
             console.log('Navigated to Ready to Ship.');
+
+            // Check for label dialog after clicking Ready to Ship
+            await checkAndDownloadLabelDialog(page, browser);
         } else {
             console.log('"Ready to Ship" tab not found. Checking if we are already there...');
             if (!page.url().includes('ready-to-ship')) {
@@ -281,8 +420,25 @@ async function loadCookies(page) {
 
             if (filterOption.asElement()) {
                 await filterOption.click();
-                console.log(`Filter "Label downloaded: ${filterOptionText}" applied.`);
-                await new Promise(r => setTimeout(r, randomDelay(3000, 5000)));
+                console.log(`Selected option: "${filterOptionText}"`);
+                await new Promise(r => setTimeout(r, randomDelay(500, 1000)));
+
+                // Click the Apply button
+                const applyButton = await page.evaluateHandle(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    return buttons.find(btn => btn.innerText.trim() === 'Apply');
+                });
+
+                if (applyButton.asElement()) {
+                    await applyButton.click();
+                    console.log('Clicked "Apply" button to confirm filter.');
+                    await new Promise(r => setTimeout(r, randomDelay(3000, 5000)));
+
+                    // Check for label dialog after applying filter
+                    await checkAndDownloadLabelDialog(page, browser);
+                } else {
+                    console.warn('Apply button not found in filter dropdown.');
+                }
             } else {
                 console.warn(`Option "${filterOptionText}" not found.`);
             }
@@ -307,6 +463,9 @@ async function loadCookies(page) {
             await checkbox.click();
             console.log('Clicked Select All checkbox.');
             await new Promise(r => setTimeout(r, randomDelay(1000, 2000)));
+
+            // Check for label dialog after selecting orders
+            await checkAndDownloadLabelDialog(page, browser);
         } else {
             console.warn('Select All checkbox not found.');
             await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'no_checkbox.png') });
@@ -333,7 +492,7 @@ async function loadCookies(page) {
                     if (bodyText.includes('Temporary issue with Label Generation')) {
                         return 'temporary_issue';
                     }
-                    if (bodyText.includes('Labels generated successfully') || bodyText.includes('Label generated successfully')) {
+                    if (bodyText.includes('Labels generated successfully') || bodyText.includes('Label generated successfully') || bodyText.includes('Ready to Ship Labels')) {
                         return 'success';
                     }
                     return null;
@@ -351,41 +510,50 @@ async function loadCookies(page) {
                 }
 
                 console.log('Labels generated successfully.');
+                await new Promise(r => setTimeout(r, 1000)); // Brief wait for dialog to fully render
 
-                // Click download in modal
-                const modalDownloadBtn = await page.evaluateHandle(() => {
-                    // Find button with "Label" text inside a modal/dialog
-                    const dialogs = document.querySelectorAll('div[role="dialog"]');
-                    const lastDialog = dialogs[dialogs.length - 1]; // Usually the top one
-                    if (!lastDialog) return null;
+                // Use the helper function to download the label
+                const downloadSuccess = await checkAndDownloadLabelDialog(page, browser);
 
-                    const buttons = Array.from(lastDialog.querySelectorAll('button'));
-                    return buttons.find(b => b.innerText.trim() === 'Label' || b.innerText.trim() === 'Download');
-                });
+                if (!downloadSuccess) {
+                    console.warn('⚠️  Label dialog detected but download failed. Trying fallback method...');
+                    // Fallback to original method
+                    const modalDownloadBtn = await page.evaluateHandle(() => {
+                        const dialogs = document.querySelectorAll('div[role="dialog"]');
+                        const lastDialog = dialogs[dialogs.length - 1];
+                        if (!lastDialog) return null;
 
-                if (modalDownloadBtn.asElement()) {
-                    await modalDownloadBtn.click();
-                    console.log('Clicked download button in modal.');
+                        const buttons = Array.from(lastDialog.querySelectorAll('button'));
+                        return buttons.find(b => b.innerText.trim() === 'Label' || b.innerText.trim() === 'Download');
+                    });
 
-                    // Wait for PDF
-                    console.log('Waiting for PDF file download...');
-                    for (let i = 0; i < 60; i++) {
-                        const files = fs.readdirSync(DOWNLOAD_PATH);
-                        const pdfFile = files.find(f => f.endsWith('.pdf'));
-                        if (pdfFile) {
-                            console.log(`Downloaded file: ${pdfFile}`);
-                            break;
+                    if (modalDownloadBtn.asElement()) {
+                        await modalDownloadBtn.click();
+                        console.log('Clicked download button in modal (fallback).');
+
+                        // Wait for PDF
+                        console.log('Waiting for PDF file download...');
+                        for (let i = 0; i < 60; i++) {
+                            const files = fs.readdirSync(DOWNLOAD_PATH);
+                            const pdfFile = files.find(f => f.endsWith('.pdf'));
+                            if (pdfFile) {
+                                console.log(`✅ SUCCESS! Downloaded label file: ${pdfFile}`);
+                                console.log(`📁 Saved to: ${DOWNLOAD_PATH}`);
+                                break;
+                            }
+                            await new Promise(r => setTimeout(r, 1000));
                         }
-                        await new Promise(r => setTimeout(r, 1000));
+                    } else {
+                        console.error('Download button in modal not found.');
+                        await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'error_modal_btn.png') });
                     }
-                } else {
-                    console.error('Download button in modal not found.');
-                    await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'error_modal_btn.png') });
                 }
 
             } catch (e) {
                 console.error('Timeout waiting for label generation:', e.message);
                 await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'error_generation_timeout.png') });
+                // Still try to check for dialog as a last resort
+                await checkAndDownloadLabelDialog(page, browser);
             }
 
         } else {
