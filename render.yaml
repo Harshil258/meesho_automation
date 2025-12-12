@@ -12,3 +12,5 @@ services:
         sync: false
       - key: API_KEY
         generateValue: true
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/project/src/.cache

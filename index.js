@@ -194,6 +194,12 @@ async function loadCookies(page) {
         defaultViewport: null
     });
 
+    console.log('Browser launch config:', {
+        executablePath: puppeteer.executablePath(),
+        defaultArgs: puppeteer.defaultArgs()
+    });
+
+
     const page = await browser.newPage();
 
     // Set User Agent to avoid bot detection (and fix loading issues)
