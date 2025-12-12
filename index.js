@@ -261,11 +261,50 @@ async function loadCookies(page) {
             await page.goto('https://supplier.meesho.com/panel/v3/new/root/login', { waitUntil: 'networkidle2', timeout: 60000 });
 
             // Login Flow
-            const emailSelector = 'input[name="emailOrPhone"]'; // Corrected selector
-            const passwordSelector = 'input[type="password"], input[name="password"]';
+            const emailSelectors = [
+                'input[name="emailOrPhone"]',
+                'input[type="email"]',
+                'input[type="tel"]',
+                'input[id*="email"]',
+                'input[placeholder*="mail"]',
+                'input[placeholder*="Phone"]'
+            ];
 
-            await page.waitForSelector(emailSelector, { visible: true, timeout: 30000 });
-            await page.type(emailSelector, process.env.MEESHO_EMAIL, { delay: randomDelay(50, 150) });
+            let emailInput = null;
+            console.log('Waiting for email input field...');
+
+            try {
+                // Wait for any of the potential selectors
+                const foundSelector = await page.waitForFunction((selectors) => {
+                    for (const s of selectors) {
+                        if (document.querySelector(s)) return s;
+                    }
+                    return false;
+                }, { timeout: 30000 }, emailSelectors);
+
+                const selector = await foundSelector.jsonValue();
+                console.log(`✓ Found email input using selector: ${selector}`);
+                emailInput = await page.$(selector);
+
+                if (emailInput) {
+                    await emailInput.type(process.env.MEESHO_EMAIL, { delay: randomDelay(50, 150) });
+                }
+            } catch (e) {
+                console.error('❌ Could not find email input field within timeout.');
+                console.log('Current URL:', page.url());
+
+                // Debug: Dump HTML to logs
+                const html = await page.content();
+                console.log('--- PAGE HTML START ---');
+                console.log(html.substring(0, 5000)); // Log first 5000 chars
+                console.log('... (truncated) ...');
+                console.log('--- PAGE HTML END ---');
+
+                await page.screenshot({ path: path.join(DOWNLOAD_PATH, 'login_input_missing.png') });
+                throw new Error(`Login failed: Email input not found. ${e.message}`);
+            }
+
+            await new Promise(r => setTimeout(r, randomDelay(500, 1000)));
             await new Promise(r => setTimeout(r, randomDelay(500, 1000)));
 
             await page.type(passwordSelector, process.env.MEESHO_PASSWORD, { delay: randomDelay(50, 150) });
