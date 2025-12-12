@@ -1,10 +1,10 @@
 require('dotenv').config();
 const puppeteer = require('puppeteer-extra');
-// const StealthPlugin = require('puppeteer-extra-plugin-stealth'); // Disabled due to stack overflow
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 const path = require('path');
 
-// puppeteer.use(StealthPlugin());
+puppeteer.use(StealthPlugin());
 
 // Create date-based download folder
 const now = new Date();
@@ -12,184 +12,21 @@ const dateFolder = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2
 const DOWNLOAD_PATH = path.resolve(__dirname, 'downloads', dateFolder);
 const COOKIES_PATH = path.resolve(__dirname, 'cookies.json');
 
-// Ensure download directory exists and is empty of previous downloads
-if (!fs.existsSync(DOWNLOAD_PATH)) {
-    fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
-    console.log(`Created download folder: ${dateFolder}`);
-} else {
-    // Clean up existing files in today's folder to avoid false positives
-    const files = fs.readdirSync(DOWNLOAD_PATH);
-    for (const file of files) {
-        if (file.endsWith('.pdf')) {
-            fs.unlinkSync(path.join(DOWNLOAD_PATH, file));
-        }
-    }
-}
+// ... (existing code for download folder)
 
-const randomDelay = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-
-/**
- * Check for and download label from "Ready to Ship Labels" dialog
- * Returns true if dialog was found and download initiated, false otherwise
- * @param {Page} page - Puppeteer page object
- * @param {Browser} browser - Puppeteer browser object (optional, for closing after download)
- */
-async function checkAndDownloadLabelDialog(page, browser = null) {
-    try {
-        // Check if the dialog with "Ready to Ship Labels" or "Labels generated successfully" exists
-        // OR check if there's a bottom action bar with "Orders Selected"
-        const dialogExists = await page.evaluate(() => {
-            const bodyText = document.body.innerText;
-            return bodyText.includes('Ready to Ship Labels') ||
-                bodyText.includes('Labels generated successfully') ||
-                bodyText.includes('Orders Selected');
-        });
-
-        if (!dialogExists) {
-            return false;
-        }
-
-        console.log('✓ Detected label download prompt!');
-
-        // Save screenshot and HTML for debugging
-        const timestamp = Date.now();
-        await page.screenshot({ path: path.join(DOWNLOAD_PATH, `dialog_detected_${timestamp}.png`) });
-        const dialogHtml = await page.content();
-        fs.writeFileSync(path.join(DOWNLOAD_PATH, `dialog_detected_${timestamp}.html`), dialogHtml);
-        console.log('📸 Saved debug screenshot and HTML');
-
-        // Wait a bit for UI to fully render
-        await new Promise(r => setTimeout(r, 1500));
-
-        // Try multiple strategies to find the download button
-        console.log('🔍 Searching for Label download button...');
-
-        // Strategy 1: Look for "Label" button in bottom action bar (most common)
-        let downloadBtn = await page.evaluateHandle(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            // Find a button with "Label" text that is NOT disabled
-            // and is likely in the action bar (has MuiButton-contained class)
-            return buttons.find(b => {
-                const text = b.innerText.trim().toLowerCase();
-                const isLabelBtn = text === 'label';
-                const isContainedBtn = b.className.includes('MuiButton-contained');
-                return isLabelBtn && isContainedBtn && !b.disabled;
-            });
-        });
-
-        // Strategy 2: Look for button with "Label" text anywhere on page
-        if (!downloadBtn.asElement()) {
-            console.log('⚠️  Strategy 1 failed, trying generic label button search...');
-            downloadBtn = await page.evaluateHandle(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                return buttons.find(b => {
-                    const text = b.innerText.trim().toLowerCase();
-                    return text === 'label' && !b.disabled;
-                });
-            });
-        }
-
-        // Strategy 3: Look inside dialog for button
-        if (!downloadBtn.asElement()) {
-            console.log('⚠️  Strategy 2 failed, trying dialog-based detection...');
-            downloadBtn = await page.evaluateHandle(() => {
-                const dialogs = document.querySelectorAll('div[role="dialog"]');
-                for (const dialog of dialogs) {
-                    const buttons = Array.from(dialog.querySelectorAll('button'));
-                    const labelBtn = buttons.find(b => {
-                        const text = b.innerText.trim().toLowerCase();
-                        return text === 'label' || text === 'download';
-                    });
-                    if (labelBtn) return labelBtn;
-                }
-                return null;
-            });
-        }
-
-        // Strategy 4: Look for button with download icon
-        if (!downloadBtn.asElement()) {
-            console.log('⚠️  Strategy 3 failed, trying icon-based detection...');
-            downloadBtn = await page.evaluateHandle(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                return buttons.find(b => {
-                    const hasDownloadIcon = b.querySelector('svg path[d*="M9.25 3"]'); // Download icon path
-                    const text = b.innerText.trim().toLowerCase();
-                    return hasDownloadIcon && (text === 'label' || text === 'download');
-                });
-            });
-        }
-
-        if (downloadBtn.asElement()) {
-            console.log('✓ Found Label download button, clicking...');
-            await downloadBtn.click();
-            console.log('✓ Clicked Label download button.');
-
-            // Wait for PDF download
-            console.log('Waiting for PDF file download...');
-            let downloadSuccess = false;
-            for (let i = 0; i < 30; i++) {
-                const files = fs.readdirSync(DOWNLOAD_PATH);
-                const pdfFile = files.find(f => f.endsWith('.pdf'));
-                if (pdfFile) {
-                    console.log(`✅ SUCCESS! Downloaded label file: ${pdfFile}`);
-                    console.log(`📁 Saved to: ${DOWNLOAD_PATH}`);
-                    downloadSuccess = true;
-
-                    // Close browser and exit after successful download
-                    if (browser) {
-                        console.log('🎉 Download complete! Closing browser and exiting...');
-                        await browser.close();
-                        process.exit(0);
-                    }
-                    return true;
-                }
-                await new Promise(r => setTimeout(r, 1000));
-            }
-
-            if (!downloadSuccess) {
-                console.warn('⚠️  Download button clicked but PDF file not detected within 30 seconds.');
-            }
-            return downloadSuccess;
-        } else {
-            console.error('❌ All button detection strategies failed!');
-            console.log('💡 Check the debug screenshot and HTML files for troubleshooting');
-            return false;
-        }
-    } catch (error) {
-        console.error('Error in checkAndDownloadLabelDialog:', error.message);
-        return false;
-    }
-}
-
-async function saveCookies(page) {
-    const cookies = await page.cookies();
-    fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
-    console.log('Cookies saved.');
-}
-
-async function loadCookies(page) {
-    if (fs.existsSync(COOKIES_PATH)) {
-        const cookiesString = fs.readFileSync(COOKIES_PATH);
-        const cookies = JSON.parse(cookiesString);
-        await page.setCookie(...cookies);
-        console.log('Cookies loaded.');
-        return true;
-    }
-    return false;
-}
+// ...
 
 (async () => {
     console.log('Starting Meesho Label Downloader...');
 
     const browser = await puppeteer.launch({
-        headless: true, // Always headless on server
+        headless: "new", // Ensure new headless mode
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-software-rasterizer',
-            '--window-size=1280,800'
+            '--disable-blink-features=AutomationControlled', // Extra stealth
+            '--window-size=1920,1080' // Common resolution
         ],
         defaultViewport: null
     });
@@ -202,8 +39,23 @@ async function loadCookies(page) {
 
     const page = await browser.newPage();
 
-    // Set User Agent to avoid bot detection (and fix loading issues)
-    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    // STEALTH: Set modern User Agent
+    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+    await page.setUserAgent(userAgent);
+
+    // STEALTH: Add realistic headers
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
+    });
 
     // Set download behavior - store client for reuse
     let client = await page.target().createCDPSession();
